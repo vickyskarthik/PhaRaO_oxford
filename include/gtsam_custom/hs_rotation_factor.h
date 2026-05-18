@@ -28,7 +28,8 @@ public:
 
   /** h(x)-z */
   Vector evaluateError(const Pose2& pose1, const Pose2& pose2,
-      OptionalMatrixType H1, OptionalMatrixType H2) const override;
+      boost::optional<Matrix&> H1 = boost::none,
+      boost::optional<Matrix&> H2 = boost::none) const override;
 
   /** return the measured */
   inline double mtheta() const { return mtheta_; }

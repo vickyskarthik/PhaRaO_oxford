@@ -10,7 +10,7 @@ endif ()
 
 # INCLUDE LOCAL MODULES
 #========================================================================
-set (CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "./cmake")
+set (CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 file (GLOB MODULES "${CMAKE_MODULE_PATH}/*.cmake")
 foreach (MODULE ${MODULES})
   include (${MODULE})
@@ -111,4 +111,11 @@ target_link_libraries(${PROJECT_NAME}_node
   ${Boost_LIBRARIES}
   -lfftw3 -lfftw3f
   -lfftw3f_threads
+)
+
+# Oxford radar PNG publisher (reads files, publishes to /radar/image_polar)
+add_executable(oxford_radar_publisher src/oxford_radar_publisher.cpp)
+target_link_libraries(oxford_radar_publisher
+  ${catkin_LIBRARIES}
+  ${OpenCV_LIBS}
 )

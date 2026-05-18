@@ -41,6 +41,9 @@ class PhaRaO
 		~PhaRaO();
 		void callback(const sensor_msgs::ImageConstPtr&);
 
+		// Returns latest estimated (x, y, theta) in metres/radians
+		Eigen::Vector3d getLatestPose() const { return go_->getLatestPose(); }
+
 	private:
 		void preprocess_coarse(cv::Mat img);
 		void preprocess_fine(cv::Mat img);
@@ -54,6 +57,9 @@ class PhaRaO
 		int param_ang_bin_ = 400;
 		int param_scale_ = 10;
 		int param_sub_ = 500;
+		double param_resol_ = 0.059612233;  // radar range resolution
+		bool param_display_ = false;        // enable imshow display
+		bool param_use_log_mag_ = true;     // use log(magnitude) in FMT (original code)
 
 		int width_, height_;
 		int p_width_, p_height_;

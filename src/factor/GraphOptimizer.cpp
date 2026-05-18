@@ -1,8 +1,14 @@
 #include <factor/GraphOptimizer.hpp>
+#include <gtsam/linear/linearExceptions.h>
+#include <gtsam/nonlinear/Values.h>
+#include <map>
+#include <fstream>
 
-GraphOptimizer::GraphOptimizer(ros::NodeHandle nh, DataContainer* dc)
+GraphOptimizer::GraphOptimizer(ros::NodeHandle nh, DataContainer* dc, double resol)
 							: nh_(nh), dc_(dc), FactorConstructor(dc)
 {
+	RESOL = resol;
+
 	// ROS
 	nh_.getParam("odom_factor_cost_threshold", odom_threshold_);
 	nh_.getParam("keyframe_factor_cost_threshold", keyf_threshold_);
@@ -25,6 +31,9 @@ GraphOptimizer::GraphOptimizer(ros::NodeHandle nh, DataContainer* dc)
 	// GTSAM
 	parameters.relinearizeThreshold = 0.01;
 	parameters.relinearizeSkip = 1;
+	// Use QR factorization: more numerically stable than default Cholesky for
+	// ill-conditioned systems (e.g., near-singular rotation-only factors)
+	parameters.factorization = ISAM2Params::QR;
 	isam2 = new ISAM2(parameters);
 
 	Eigen::AngleAxisd rollAngle(0.0, Eigen::Vector3d::UnitX());   //M_PI
@@ -54,8 +63,11 @@ GraphOptimizer::~GraphOptimizer()
 void
 GraphOptimizer::optimize()
 {
-	
-	imshow("Coarse cart.",*(dc_->window_list_cart.end()-1));
+	// Guard display behind parameter (avoids crashes in headless mode)
+	if (nh_.param("display_enabled", false)) {
+		imshow("Coarse cart.",*(dc_->window_list_cart.end()-1));
+		waitKey(1);
+	}
 
 	// initialize
 	if(dc_->initialized == false){
@@ -135,8 +147,19 @@ GraphOptimizer::generateOdomFactor()
 				Eigen::Rotation2D<double> odom_rot(base_pose(2));
 				
 				double x = norm;
-				double theta = dc_->odom_list[num-1][2] - bias/(double)bias_cnt;
-				double y = x * tan(theta);
+				double theta = (bias_cnt > 0) ?
+				    dc_->odom_list[num-1][2] - bias/(double)bias_cnt :
+				    dc_->odom_list[num-1][2];
+				// Fix: clamp theta before tan() to prevent overflow (tan(±90°) = ±∞).
+				// Max ~28° per frame is physically reasonable for any ground vehicle.
+				const double MAX_THETA_RAD = 0.5;  // ~28.6°
+				double theta_safe = std::max(-MAX_THETA_RAD, std::min(MAX_THETA_RAD, theta));
+				double y = x * std::tan(theta_safe);
+				// Fix: guard against NaN/Inf in any computed value
+				if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(theta)) {
+					ROS_WARN("[PhaRaO] Non-finite odom value (x=%.2f y=%.2f θ=%.2f) — skipping frame.", x, y, theta);
+					return false;
+				}
 
 				Eigen::Vector2d tr_delta(x, y);
 				Eigen::Rotation2D<double> rot_delta(theta);
@@ -149,7 +172,14 @@ GraphOptimizer::generateOdomFactor()
 				Rot2 orien = Rot2(current_pose(2));
 				Pose2 prop_pose = gtsam::Pose2(orien, prop_point);
 
-				Pose2 odom_delta = gtsam::Pose2(x, y, theta); // x,y,theta
+				// Hard motion limit: reject physically implausible per-frame displacements
+				// Oxford radar at 4Hz, max ~20 m/s → max ~5 m/frame
+				const double MAX_TRANS = 8.0;  // metres per frame
+				if (x > MAX_TRANS) {
+					ROS_WARN("[PhaRaO] Implausible translation %.2f m — rejecting as outlier.", x);
+					return false;
+				}
+				Pose2 odom_delta = gtsam::Pose2(x, y, theta_safe); // use clamped theta
 				poseGraph->add(BetweenFactor<Pose2>(X(pose_count-ii), X(pose_count), odom_delta, odom_noise_model_));
 				
 				initial_values.insert(X(pose_count), prop_pose);
@@ -167,7 +197,7 @@ GraphOptimizer::generateOdomFactor()
 				cout << "Current pose number: " << pose_count << endl;
 				cout << "Best Matching pair: " << pose_count-ii << " & " << pose_count <<endl;
 				cout << "x: " << dc_->odom_list[num-1][0] << ", y: " << dc_->odom_list[num-1][1]
-					<< ", theta: " << dc_->odom_list[num-1][2] - bias/(double)bias_cnt << endl;
+					<< ", theta: " << theta << endl;
 
 				return true;
 			}
@@ -324,9 +354,36 @@ GraphOptimizer::generateKeyfFactor()
 			if(p_size > 2) {
 				poseGraph->print();
 
-				isam2->update(*poseGraph, initial_values);
-				isam2->update();
-				Values odom_result = isam2->calculateEstimate();
+				Values odom_result;
+				bool opt_ok = false;
+				try {
+					isam2->update(*poseGraph, initial_values);
+					isam2->update();
+					odom_result = isam2->calculateEstimate();
+					opt_ok = true;
+				} catch (const gtsam::IndeterminantLinearSystemException& e) {
+					ROS_WARN("[PhaRaO] GTSAM IndeterminantLinearSystem — skipping, continuing with raw odometry.");
+				} catch (const gtsam::ValuesKeyAlreadyExists& e) {
+					ROS_WARN("[PhaRaO] GTSAM duplicate key — skipping optimization.");
+				} catch (const gtsam::ValuesKeyDoesNotExist& e) {
+					ROS_WARN("[PhaRaO] GTSAM missing key — skipping optimization.");
+				} catch (const std::exception& e) {
+					ROS_WARN("[PhaRaO] GTSAM exception: %s — skipping optimization.", e.what());
+				} catch (...) {
+					ROS_WARN("[PhaRaO] Unknown GTSAM exception — skipping optimization.");
+				}
+				if (!opt_ok) {
+					// Recovery: reset graph, keep window as-is, do not update keyframe
+					isam2 = new ISAM2(parameters);
+					poseGraph = new NonlinearFactorGraph();
+					gtsam::Values newVals;
+					initial_values = newVals;
+					// Re-add prior on current keyframe node
+					Pose2 kf_pose(current_pose(0), current_pose(1), current_pose(2));
+					poseGraph->addPrior(X(key_node), kf_pose, prior_noise_model_);
+					initial_values.insert(X(key_node), kf_pose);
+					return;
+				}
 
 				isam2 = new ISAM2(parameters);
 				poseGraph = new NonlinearFactorGraph();
@@ -382,6 +439,11 @@ GraphOptimizer::generateKeyfFactor()
 				dc_->window_list_cart_f.clear();
 				dc_->stamp_list.clear();
 
+				// Replace old keyframe data (only keep latest keyframe to prevent OOM)
+				dc_->keyf_list.clear();
+				dc_->keyf_list_cart.clear();
+				dc_->keyf_list_cart_f.clear();
+				dc_->keyf_stamp_list.clear();
 				dc_->keyf_list.push_back(last_p);
 				dc_->keyf_list_cart.push_back(last_c);
 				dc_->keyf_list_cart_f.push_back(last_cf);
@@ -459,8 +521,13 @@ bool
 GraphOptimizer::saveToFile(string filename, ros::Time stamp, 
 							Pose2 pose, Eigen::Quaterniond quat)
 {
+	// Truncate on first write for this file path so multiple runs don't append
+	static std::map<std::string, bool> first_write;
+	auto mode = first_write[filename] ? (ios::app) : (ios::out | ios::trunc);
+	first_write[filename] = true;
+
 	ofstream writeFile;
-	writeFile.open(filename, ios::app);
+	writeFile.open(filename, mode);
 	if(writeFile.is_open()) {
 		writeFile << stamp << ' '
 				  << pose.translation().x() << ' '

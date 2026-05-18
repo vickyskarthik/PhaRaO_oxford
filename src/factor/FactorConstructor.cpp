@@ -48,7 +48,14 @@ FactorConstructor::phaseCorr2D(cv::Mat r_src1, cv::Mat r_src2, cv::Mat src1, cv:
 	cv::Point2d peakLoc_r;
 
 	if(flag == true) {
-		peakLoc_r = cv::phaseCorrelate(r_src1, r_src2, cv::noArray(), &phaseCorr);
+		// Fix 4: Apply Hanning window to log-polar images to reduce spectral leakage
+		if (logpolar_hann_.empty() || logpolar_hann_.size() != r_src1.size()) {
+			itf.createHanningWindow(logpolar_hann_, r_src1.size(), CV_32F);
+		}
+		cv::Mat r1_win = r_src1.mul(logpolar_hann_);
+		cv::Mat r2_win = r_src2.mul(logpolar_hann_);
+
+		peakLoc_r = cv::phaseCorrelate(r1_win, r2_win, cv::noArray(), &phaseCorr);
 		rotation = (peakLoc_r.y - init_val[2])*(360.0/(r_src1.rows));
 		theta = rotation*(M_PI/180.0);
 	} else {

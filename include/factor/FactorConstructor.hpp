@@ -43,9 +43,17 @@ class FactorConstructor
 		double init_val[3] = {0,};
 		double init_val_f[3] = {0,};
 
+		// Fix 3: Multi-frame calibration — accumulate init_val over first N frames
+		double init_val_sum[3] = {0,};
+		double init_val_f_sum[3] = {0,};
+		int    init_calib_count_ = 0;
+		static const int INIT_CALIB_FRAMES = 30;  // average over this many frames
+
 		double ratio = 10.0;	// seq03_kaist : 14.0, others : 10.0
-		const double RESOL = 0.059612233;
-		//const double RESOL = 2733/1024;
+		double RESOL = 0.059612233;  // MulRan default; set to 0.0432 for Oxford CTS350
+
+		// Fix 4: cached Hanning window for log-polar images
+		cv::Mat logpolar_hann_;
 
 		ImageTF itf;
 };

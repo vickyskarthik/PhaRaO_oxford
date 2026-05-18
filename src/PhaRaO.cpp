@@ -8,6 +8,13 @@ PhaRaO::PhaRaO(ros::NodeHandle nh) : nh_(nh)
 
 	nh_.getParam("coarse_scale_factor", param_scale_);
 	nh_.getParam("sub_img_size", param_sub_);
+	nh_.getParam("radar_resolution", param_resol_);
+	nh_.getParam("display_enabled", param_display_);
+	nh_.getParam("use_log_magnitude", param_use_log_mag_);
+
+	ROS_INFO("[PhaRaO] range_bin=%d, ang_bin=%d, scale=%d, sub=%d, resol=%.6f, display=%d, log_mag=%d",
+	         param_range_bin_, param_ang_bin_, param_scale_, param_sub_, param_resol_,
+	         (int)param_display_, (int)param_use_log_mag_);
 
 	width_ 		= floor((double) param_range_bin_ / (double) param_scale_);
 	height_ 	= width_;
@@ -16,7 +23,7 @@ PhaRaO::PhaRaO(ros::NodeHandle nh) : nh_(nh)
 
 	ddc_.initialized = false;
 	dc_ = &ddc_;
-	go_ = new GraphOptimizer(nh_, dc_);
+	go_ = new GraphOptimizer(nh_, dc_, param_resol_);
 }
 
 PhaRaO::~PhaRaO()
@@ -52,7 +59,9 @@ PhaRaO::callback(const sensor_msgs::ImageConstPtr& msg)
 
 	go_->optimize();
 
-	waitKey(1);
+	// Guard waitKey behind display flag — calling it headless can block/crash
+	if (param_display_)
+		waitKey(1);
 
 }
 
@@ -73,6 +82,11 @@ PhaRaO::preprocess_coarse(cv::Mat img)
 				Point2f( width_,height_ ), width_, CV_INTER_AREA | CV_WARP_INVERSE_MAP);
 
 	////////////////////////////////////////////////////////////////////////////
+	// Hanning window — reduces spectral leakage before DFT (standard for FMT)
+	cv::Mat hann;
+	itf.createHanningWindow(hann, resize_cart.size(), CV_32F);
+	resize_cart = resize_cart.mul(hann);
+
 	// FFT Module (OpenCV)
 	cv::Mat padded;
 	int m = getOptimalDFTSize( resize_cart.rows );
@@ -91,7 +105,8 @@ PhaRaO::preprocess_coarse(cv::Mat img)
 	magnitude(planes[0], planes[1], planes[0]);// planes[0] = magnitude
 	Mat magI = planes[0];
 
-	log(magI, magI);
+	if (param_use_log_mag_)
+		log(magI, magI);  // A/B toggle: log compression on DFT magnitude
 
 	itf.fftShift(magI);
 

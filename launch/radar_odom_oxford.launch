@@ -1,0 +1,72 @@
+<?xml version="1.0"?>
+<launch>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         PhaRaO on Oxford Radar RobotCar — offline direct-call mode
+         Single node: iterates PNGs and calls pr.callback() directly.
+         No publisher node, no queue, no timing issues.
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- ── Dataset paths ── -->
+    <arg name="data_dir"
+         default="/home/mcw/Desktop/MAY16PhD/2019-01-10-12-32-52-radar-oxford-10k/radar/"/>
+    <arg name="gt_file"
+         default="/home/mcw/Desktop/MAY16PhD/PW-ndt/catkin_ws/src/poses/2019-01-10-12-32-52-radar-oxford-10k_gt.txt"/>
+    <arg name="start_index" default="112"/>
+    <arg name="end_index"   default="-1"/>
+
+    <!-- ── RViz ── -->
+    <node pkg="rviz" type="rviz" name="rviz"
+          args="-d $(find pharao_gtsam)/rviz/odom.rviz"
+          required="false"/>
+
+    <!-- ── PhaRaO node (offline loop inside main.cpp) ── -->
+    <node pkg="pharao_gtsam" type="pharao_gtsam_node" name="pharao_gtsam_node"
+          output="screen">
+
+        <!-- Offline loop parameters -->
+        <param name="data_dir"      type="str" value="$(arg data_dir)"/>
+        <param name="gt_file"       type="str" value="$(arg gt_file)"/>
+        <param name="start_index"   type="int" value="$(arg start_index)"/>
+        <param name="end_index"     type="int" value="$(arg end_index)"/>
+
+        <!-- Sensor/Data dependent parameters -->
+        <param name="is_polar_img"          type="bool" value="true"/>
+        <!-- Oxford CTS350: 400 azimuths × 3768 range bins (after stripping 11-byte header) -->
+        <param name="radar_range_bin"       type="int"  value="3768"/>
+        <param name="radar_angular_bin"     type="int"  value="400"/>
+
+        <!-- User custom parameters -->
+        <!-- coarse_scale_factor: downsample factor for coarse FMT
+             Oxford has 3768 range bins → width_ = 3768/10 = 376 px
+             MulRan default was 10.0, keep the same -->
+        <param name="coarse_scale_factor"               type="double" value="10.0"/>
+        <!-- sub_img_size: range bins for fine phase correlation (default 500) -->
+        <param name="sub_img_size"                      type="int"    value="500"/>
+        <!-- radar_resolution: metres per range bin (Oxford CTS350 = 0.0432 m) -->
+        <param name="radar_resolution"                  type="double" value="0.0432"/>
+
+        <!-- A/B testing toggles -->
+        <param name="display_enabled"                   type="bool"   value="false"/>
+        <param name="use_log_magnitude"                 type="bool"   value="true"/>
+
+        <param name="odom_factor_cost_threshold"        type="double" value="0.8"/>
+        <param name="keyframe_factor_cost_threshold"    type="double" value="0.75"/>
+        <param name="max_velocity_threshold"            type="double" value="20.0"/>
+        <param name="max_angular_velocity_threshold"    type="double" value="7.0"/>
+
+        <param name="odom_noise_model_variance_x"       type="double" value="1.0e-03"/>
+        <param name="odom_noise_model_variance_y"       type="double" value="1.0e-03"/>
+        <param name="odom_noise_model_variance_theta"   type="double" value="1.0e-03"/>
+        <param name="keyframe_noise_model_variance"     type="double" value="1.0e-02"/>
+        <param name="velocity_direction_noise_model_variance" type="double" value="1.0e-01"/>
+
+        <!-- Save results -->
+        <param name="save_results_flag"             type="bool" value="true"/>
+        <param name="path_filename_odom"            type="str"
+               value="/tmp/pharao_oxford_odom.txt"/>
+        <param name="path_filename_optimized_odom"  type="str"
+               value="/tmp/pharao_oxford_optodom.txt"/>
+    </node>
+
+</launch>

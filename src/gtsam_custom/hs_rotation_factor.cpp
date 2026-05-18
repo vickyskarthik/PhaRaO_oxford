@@ -11,18 +11,13 @@ PharaoRotFactor::PharaoRotFactor(Key poseKey1, Key poseKey2, double mtheta,
 
 /* ************************************************************************* */
 Vector PharaoRotFactor::evaluateError(const Pose2& pose1, const Pose2& pose2,
-    OptionalMatrixType H1, OptionalMatrixType H2) const {
+    boost::optional<Matrix&> H1, boost::optional<Matrix&> H2) const {
 
-  double hx = .0;
-  if(pose2.theta()>M_PI/2 && pose1.theta()<-M_PI/2){
-      hx = pose2.theta() - 2*M_PI - pose1.theta();
-  }
-  else if (pose2.theta()<-M_PI/2 && pose1.theta()>M_PI/2){
-      hx = pose2.theta() - pose1.theta() + 2*M_PI;
-  }
-  else{
-      hx = pose2.theta() - pose1.theta();
-  }
+  // Fix: use atan2(sin,cos) for correct modular angle difference in all quadrants.
+  // Original code used ±M_PI/2 thresholds which fired incorrectly for θ ∈ (π/2, π),
+  // producing wrong residuals that made the GTSAM Hessian singular.
+  double hx = std::atan2(std::sin(pose2.theta() - pose1.theta()),
+                         std::cos(pose2.theta() - pose1.theta()));
 
   if (H1) {
     *H1 = Matrix::Zero(1,3);

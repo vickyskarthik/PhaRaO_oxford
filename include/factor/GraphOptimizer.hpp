@@ -12,11 +12,14 @@ inline Key X(std::uint64_t j) { return Symbol('x', j); } // Pose2 (x,y,theta)
 class GraphOptimizer : public FactorConstructor
 {
 	public:
-		GraphOptimizer(ros::NodeHandle nh, DataContainer* dc);
+		GraphOptimizer(ros::NodeHandle nh, DataContainer* dc, double resol = 0.059612233);
 		~GraphOptimizer();
 		bool generateOdomFactor();
 		void generateKeyfFactor();
 		void optimize();
+
+		// Expose latest (x, y, theta) for per-frame error reporting in main.cpp
+		Eigen::Vector3d getLatestPose() const { return current_pose.cast<double>(); }
 
 	protected:
 		void publishOdom(ros::Time stamp, Pose2 pose, Eigen::Quaterniond quat);

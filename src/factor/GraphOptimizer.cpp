@@ -373,15 +373,42 @@ GraphOptimizer::generateKeyfFactor()
 					ROS_WARN("[PhaRaO] Unknown GTSAM exception — skipping optimization.");
 				}
 				if (!opt_ok) {
-					// Recovery: reset graph, keep window as-is, do not update keyframe
+					// Recovery: fully reset GTSAM and pose graph state.
+					// CRITICAL: also reset pose_count to key_node so the next
+					// BetweenFactor uses X(key_node) which exists in initial_values.
+					// Without this, the next factor references X(pose_count-1) which
+					// is NOT in initial_values after the reset → segfault.
 					isam2 = new ISAM2(parameters);
 					poseGraph = new NonlinearFactorGraph();
 					gtsam::Values newVals;
 					initial_values = newVals;
-					// Re-add prior on current keyframe node
+
+					// Re-anchor at the last known good keyframe pose
 					Pose2 kf_pose(current_pose(0), current_pose(1), current_pose(2));
 					poseGraph->addPrior(X(key_node), kf_pose, prior_noise_model_);
 					initial_values.insert(X(key_node), kf_pose);
+
+					// Reset pose_count so next BetweenFactor is (key_node → key_node+1)
+					pose_count = key_node;
+
+					// Clear window to just the last frame (so next frame has a valid reference)
+					if (!dc_->window_list.empty()) {
+						cv::Mat last_p  = dc_->window_list.back();
+						cv::Mat last_c  = dc_->window_list_cart.back();
+						cv::Mat last_cf = dc_->window_list_cart_f.back();
+						ros::Time last_t = dc_->stamp_list.back();
+						dc_->window_list.clear();
+						dc_->window_list_cart.clear();
+						dc_->window_list_cart_f.clear();
+						dc_->stamp_list.clear();
+						dc_->window_list.push_back(last_p);
+						dc_->window_list_cart.push_back(last_c);
+						dc_->window_list_cart_f.push_back(last_cf);
+						dc_->stamp_list.push_back(last_t);
+					}
+
+					ROS_WARN("[PhaRaO] Recovery: reset to key_node=%d, pose_count=%d",
+					         key_node, pose_count);
 					return;
 				}
 

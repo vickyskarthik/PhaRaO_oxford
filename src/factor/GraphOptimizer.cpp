@@ -412,37 +412,10 @@ GraphOptimizer::generateKeyfFactor()
 					return;
 				}
 
-				// ── Global iSAM2: do NOT reset the Bayes tree ──────────────────────
-				// In the paper, iSAM is used as a GLOBAL optimizer — all historical
-				// factors remain active and are re-linearized as needed. The open-
-				// source code incorrectly destroyed ISAM2 at every keyframe, making
-				// it a bounded 4-frame smoother that cannot correct long-range drift.
-				//
-				// Correct usage: after update(), the Bayes tree retains ALL submitted
-				// factors. Clearing poseGraph and initial_values only empties the
-				// staging area for the NEXT batch — ISAM2 internally has everything.
-				//
-				// Effect: heading drift is now corrected globally. Each new keyframe
-				// factor (PharaoRotFactor) connects back to a key_node that carries
-				// the accumulated global constraint, not a locally-anchored prior.
-				// ─────────────────────────────────────────────────────────────────
-				// DO NOT reset isam2 here — this is the fix.
+				isam2 = new ISAM2(parameters);
 				poseGraph = new NonlinearFactorGraph();
 				gtsam::Values NewGraphValues;
 				initial_values = NewGraphValues;
-
-				// Seed current_pose from ISAM2's global estimate so the dead-reckoning
-				// initial values for new nodes start from the globally corrected position
-				// (not from drifted local propagation).
-				{
-					auto gp = odom_result.at<Pose2>(X(pose_count));
-					current_pose << gp.translation().x(), gp.translation().y(), gp.rotation().theta();
-					// Update pose_values for future base_pose lookups
-					if (pose_count < (int)pose_values.size())
-						pose_values[pose_count] = current_pose;
-					else
-						pose_values.push_back(current_pose);
-				}
 
 				/////////////////////////////////////////////////////////
 				prev_pose = odom_result.at<Pose2>(X(new_key_node));
@@ -509,15 +482,26 @@ GraphOptimizer::generateKeyfFactor()
 
 				for (int ii = p_ind; ii < num; ii++)
 				{
-					// With global iSAM2, variables X(idx) for carried-over window frames
-					// are ALREADY in the Bayes tree from previous updates. We must NOT
-					// re-add them to poseGraph or initial_values — that would cause
-					// ValuesKeyAlreadyExists errors or duplicate factors.
-					// Just update the window image data structures for the next round.
+					int idx = pose_count-num+1+ii;
+					Pose2 pose = odom_result.at<Pose2>(X(idx));
+
+					if (ii == p_ind){
+						poseGraph->addPrior(X(idx), pose, prior_noise_model_);
+						initial_values.insert(X(idx), pose);
+					}
+					else
+					{
+						Pose2 prev_pose = odom_result.at<Pose2>(X(idx-1));
+						Pose2 diff = prev_pose.inverse() * pose ;
+						poseGraph->add(BetweenFactor<Pose2>(X(idx-1), X(idx), diff, odom_noise_model_));
+						initial_values.insert(X(idx), pose);
+					}
+					
 					dc_->window_list.push_back(*(iter_p + ii - p_ind));
 					dc_->window_list_cart.push_back(*(iter_c + ii - p_ind));
 					dc_->window_list_cart_f.push_back(*(iter_cf + ii - p_ind));
 					dc_->stamp_list.push_back(*(iter_time + ii - p_ind));
+
 				}
 
 				cnt++;

@@ -9,6 +9,15 @@ GraphOptimizer::GraphOptimizer(ros::NodeHandle nh, DataContainer* dc, double res
 {
 	RESOL = resol;
 
+	// Also propagate RESOL to the ImageTF member used for fine phase correlation
+	itf.setResolution(resol);
+
+	// Read coarse scale factor and propagate it
+	double scale = 10.0;
+	nh.getParam("coarse_scale_factor", scale);
+	ratio = scale;
+	itf.setScaleFactor(scale);
+
 	// ROS
 	nh_.getParam("odom_factor_cost_threshold", odom_threshold_);
 	nh_.getParam("keyframe_factor_cost_threshold", keyf_threshold_);
@@ -61,6 +70,58 @@ GraphOptimizer::~GraphOptimizer()
 }
 
 void
+GraphOptimizer::calibrateInitVal()
+{
+	// Self-correlation calibration (per paper Section II.B):
+	// Correlate the first frame's preprocessed images with THEMSELVES
+	// to find the zero-displacement peak position.  This is deterministic
+	// and noise-free — the peak of an auto-correlation is always at the
+	// exact center, giving us the true zero baseline.
+	//
+	// Any error in init_val becomes a constant per-frame bias that
+	// accumulates linearly over thousands of frames.
+
+	if (dc_->window_list.empty() || dc_->window_list_cart.empty() ||
+	    dc_->window_list_cart_f.empty()) {
+		ROS_WARN("[PhaRaO] calibrateInitVal: no frames available yet.");
+		return;
+	}
+
+	// Use the first frame's preprocessed images
+	cv::Mat& logpolar  = dc_->window_list.back();
+	cv::Mat& cart_c    = dc_->window_list_cart.back();
+	cv::Mat& cart_f    = dc_->window_list_cart_f.back();
+
+	// ── Coarse self-correlation ──
+	// Log-polar: correlate with self → rotation baseline
+	if (logpolar_hann_.empty() || logpolar_hann_.size() != logpolar.size()) {
+		itf.createHanningWindow(logpolar_hann_, logpolar.size(), CV_32F);
+	}
+	cv::Mat lp_win = logpolar.mul(logpolar_hann_);
+	double phaseCorr;
+	cv::Point2d peakLoc_r = cv::phaseCorrelate(lp_win, lp_win, cv::noArray(), &phaseCorr);
+	init_val[2] = peakLoc_r.y;  // rotation zero-baseline
+
+	// Cartesian coarse: correlate with self → translation baseline
+	cv::Point2d peakLoc_c = cv::phaseCorrelate(cart_c, cart_c, cv::noArray(), &phaseCorr);
+	init_val[0] = peakLoc_c.x;  // x zero-baseline
+	init_val[1] = peakLoc_c.y;  // y zero-baseline
+
+	// ── Fine self-correlation ──
+	// Fine cartesian: correlate with self → fine translation baseline
+	cv::Point2d peakLoc_f = cv::phaseCorrelate(cart_f, cart_f, cv::noArray(), &phaseCorr);
+	init_val_f[0] = peakLoc_f.x;  // fine x zero-baseline
+	init_val_f[1] = peakLoc_f.y;  // fine y zero-baseline
+	init_val_f[2] = 0.0;
+
+	ROS_INFO("[PhaRaO] init_val calibrated via self-correlation:");
+	ROS_INFO("  coarse: x=%.4f, y=%.4f, theta=%.4f",
+	         init_val[0], init_val[1], init_val[2]);
+	ROS_INFO("  fine:   x=%.4f, y=%.4f",
+	         init_val_f[0], init_val_f[1]);
+}
+
+void
 GraphOptimizer::optimize()
 {
 	// Guard display behind parameter (avoids crashes in headless mode)
@@ -69,8 +130,12 @@ GraphOptimizer::optimize()
 		waitKey(1);
 	}
 
-	// initialize
+	// initialize: calibrate init_val via self-correlation on the first frame.
+	// Per the paper (Section II.B), init_val captures the zero-displacement
+	// baseline — the phase correlation peak when correlating an image with
+	// itself (Δx=Δy=Δθ=0).  Any error here becomes a constant per-frame bias.
 	if(dc_->initialized == false){
+		calibrateInitVal();
 		dc_->initialized = true;
 	}
 	else
@@ -92,127 +157,162 @@ GraphOptimizer::optimize()
 bool
 GraphOptimizer::generateOdomFactor()
 {
-	// Phase correlation (coarse to fine)
+	// Phase correlation between the last two frames in the window (consecutive pair only).
+	// The original code tried multi-frame matching (ii=1..num) which could skip
+	// intermediate nodes, leaving a disconnected factor graph → GTSAM crash.
+	// Now we ONLY match the consecutive pair (num-1, num) to guarantee a connected chain.
 	int num = dc_->window_list.size() - 1;
-	int index = 0;
+	if (num < 1) return false;
+
+	// Safety: cap window to prevent overflow of fixed arrays
+	if (num >= MAX_WINDOW) {
+		ROS_WARN("[PhaRaO] Window size %d >= MAX_WINDOW=%d, forcing keyframe.", num+1, MAX_WINDOW);
+		// Still compute the odom factor for the latest pair, then let keyframing trigger
+	}
 
 	static double bias = .0;
 	static int bias_cnt = 0;
+	static int consecutive_static = 0;  // count consecutive near-zero frames
 
 	cout << "---- Odometry Factor ----" << endl;
-	// Odom. Frame factor 
-	for(int ii = 1; ii <= num; ii++) {
-		int begin = num-ii;
-		int end = num;
-		dc_->odom_list[num-1] = factorGeneration(begin, end);
 
-		// Cost calculation
-		double o_yx = atan2(dc_->odom_list[num-1][1], dc_->odom_list[num-1][0]);
+	// Always compute phase correlation for the consecutive pair
+	int begin = num - 1;
+	int end = num;
+	auto odom_result = factorGeneration(begin, end);
 
-		double o_theta;
-		if (bias_cnt == 0)
-			o_theta = dc_->odom_list[num-1][2];
-		else
-			o_theta = dc_->odom_list[num-1][2] - bias/(double)bias_cnt;
-		double cost = exp(-abs(o_yx + o_theta));
-		double norm = sqrt(pow(dc_->odom_list[num-1][1],2) + pow(dc_->odom_list[num-1][0],2));
-		
-		cout << "[" << pose_count+1-ii << " & " << pose_count+1 << "] Cost: " << cost 
-			<< ", o_theta: " << o_theta << ", o_yx: " << o_yx << endl;
+	// Store in odom_list (safe: num-1 < MAX_WINDOW due to keyframing)
+	if (num - 1 < MAX_WINDOW)
+		dc_->odom_list[num-1] = odom_result;
 
-		if(norm < 0.5 && cost < odom_threshold_){ // There is no change.
+	// Cost calculation
+	double o_yx = atan2(odom_result[1], odom_result[0]);
+	double o_theta;
+	if (bias_cnt == 0)
+		o_theta = odom_result[2];
+	else
+		o_theta = odom_result[2] - bias/(double)bias_cnt;
+	double cost = exp(-abs(o_yx + o_theta));
+	double norm = sqrt(odom_result[0]*odom_result[0] + odom_result[1]*odom_result[1]);
 
-			bias_cnt++;
-			bias += dc_->odom_list[num-1][2];
+	cout << "[" << pose_count << " & " << pose_count+1 << "] Cost: " << cost
+		<< ", o_theta: " << o_theta << ", o_yx: " << o_yx
+		<< ", norm: " << norm << endl;
 
-			ROS_WARN("Poor Measurement.");
-			dc_->window_list.erase(dc_->window_list.end()-1);
-			dc_->window_list_cart.erase(dc_->window_list_cart.end()-1);
-			dc_->window_list_cart_f.erase(dc_->window_list_cart_f.end()-1);
-			num--;
-			dc_->stamp_list.erase(dc_->stamp_list.end()-1);
+	// Reject near-zero motion frames with low cost, but accept every Nth
+	// static frame to keep advancing through stationary sections.
+	if (norm < 0.5 && cost < odom_threshold_ && consecutive_static < 5) {
+		bias_cnt++;
+		bias += odom_result[2];
+		consecutive_static++;
 
-			return false;
-		} else {
-			if(cost >= odom_threshold_) {
-				pose_count ++;
-				pose_node_nums.push_back(pose_count);
-				if(pose_count-1 == pose_values.size()){
-					pose_values.push_back(current_pose);
-				}
-				cout << "pose num : " << pose_values.size() << endl;
-				base_pose = pose_values.at(pose_count-ii);
+		ROS_WARN("Poor Measurement (static, %d consecutive).", consecutive_static);
+		dc_->window_list.erase(dc_->window_list.end()-1);
+		dc_->window_list_cart.erase(dc_->window_list_cart.end()-1);
+		dc_->window_list_cart_f.erase(dc_->window_list_cart_f.end()-1);
+		dc_->stamp_list.erase(dc_->stamp_list.end()-1);
+		return false;
+	}
+	consecutive_static = 0;  // reset on acceptance
 
-				Eigen::Vector2d odom_tr(base_pose(0), base_pose(1));
-				Eigen::Rotation2D<double> odom_rot(base_pose(2));
-				
-				double x = norm;
-				double theta = (bias_cnt > 0) ?
-				    dc_->odom_list[num-1][2] - bias/(double)bias_cnt :
-				    dc_->odom_list[num-1][2];
-				// Fix: clamp theta before tan() to prevent overflow (tan(±90°) = ±∞).
-				// Max ~28° per frame is physically reasonable for any ground vehicle.
-				const double MAX_THETA_RAD = 0.5;  // ~28.6°
-				double theta_safe = std::max(-MAX_THETA_RAD, std::min(MAX_THETA_RAD, theta));
-				double y = x * std::tan(theta_safe);
-				// Fix: guard against NaN/Inf in any computed value
-				if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(theta)) {
-					ROS_WARN("[PhaRaO] Non-finite odom value (x=%.2f y=%.2f θ=%.2f) — skipping frame.", x, y, theta);
-					return false;
-				}
+	// Accept frame — compute odometry delta using nonholonomic decomposition.
+	// x = forward distance (norm), y = lateral motion from heading change.
+	// This acts as a nonholonomic constraint: ground vehicles move primarily
+	// forward, so lateral motion is determined by heading, not raw phase corr y.
+	double x = norm;
+	double theta = (bias_cnt > 0) ?
+		odom_result[2] - bias/(double)bias_cnt :
+		odom_result[2];
 
-				Eigen::Vector2d tr_delta(x, y);
-				Eigen::Rotation2D<double> rot_delta(theta);
-
-				odom_rot = odom_rot * rot_delta;
-				odom_tr = odom_tr + odom_rot * tr_delta;
-
-				current_pose << odom_tr(0), odom_tr(1), odom_rot.angle();
-				Point2 prop_point = gtsam::Point2(current_pose(0),current_pose(1));
-				Rot2 orien = Rot2(current_pose(2));
-				Pose2 prop_pose = gtsam::Pose2(orien, prop_point);
-
-				// Hard motion limit: reject physically implausible per-frame displacements
-				// Oxford radar at 4Hz, max ~20 m/s → max ~5 m/frame
-				const double MAX_TRANS = 8.0;  // metres per frame
-				if (x > MAX_TRANS) {
-					ROS_WARN("[PhaRaO] Implausible translation %.2f m — rejecting as outlier.", x);
-					return false;
-				}
-				Pose2 odom_delta = gtsam::Pose2(x, y, theta_safe); // use clamped theta
-				poseGraph->add(BetweenFactor<Pose2>(X(pose_count-ii), X(pose_count), odom_delta, odom_noise_model_));
-				
-				initial_values.insert(X(pose_count), prop_pose);
-
-
-				Eigen::AngleAxisd rollAngle(0.0, Eigen::Vector3d::UnitX());   //M_PI
-				Eigen::AngleAxisd pitchAngle(0.0, Eigen::Vector3d::UnitY());
-				Eigen::AngleAxisd yawAngle(odom_rot.angle(), Eigen::Vector3d::UnitZ());
-				Eigen::Quaternion<double> gtsam_quat = yawAngle * pitchAngle * rollAngle;
-
-				publishOdom(*(dc_->stamp_list.end()-1), prop_pose, gtsam_quat);
-				if (save_flag_)
-					saveToFile(filename_odom_, *(dc_->stamp_list.end()-1), prop_pose, gtsam_quat);
-
-				cout << "Current pose number: " << pose_count << endl;
-				cout << "Best Matching pair: " << pose_count-ii << " & " << pose_count <<endl;
-				cout << "x: " << dc_->odom_list[num-1][0] << ", y: " << dc_->odom_list[num-1][1]
-					<< ", theta: " << theta << endl;
-
-				return true;
-			}
-
-		}
+	// Zero-velocity clamping: when displacement is below the phase correlation
+	// noise floor (~0.1 pixel * RESOL * ratio ≈ 0.04 m), clamp to zero.
+	// This prevents noisy micro-displacements during stationary periods from
+	// accumulating into significant drift.
+	const double ZERO_VEL_THRESHOLD = 0.1;  // metres
+	if (norm < ZERO_VEL_THRESHOLD) {
+		x = 0.0;
+		theta = 0.0;
 	}
 
-	ROS_WARN("Poor Measurement.");
-	dc_->window_list.erase(dc_->window_list.end()-1);
-	dc_->window_list_cart.erase(dc_->window_list_cart.end()-1);
-	dc_->window_list_cart_f.erase(dc_->window_list_cart_f.end()-1);
-	num--;
-	dc_->stamp_list.erase(dc_->stamp_list.end()-1);
+	// Clamp theta to prevent tan() overflow
+	const double MAX_THETA_RAD = 0.5;  // ~28.6°
+	double theta_safe = std::max(-MAX_THETA_RAD, std::min(MAX_THETA_RAD, theta));
+	double y = x * std::tan(theta_safe);
 
-	return false;
+	// Guard against NaN/Inf
+	if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(theta)) {
+		ROS_WARN("[PhaRaO] Non-finite odom (x=%.2f y=%.2f θ=%.4f) — skipping.", x, y, theta);
+		dc_->window_list.erase(dc_->window_list.end()-1);
+		dc_->window_list_cart.erase(dc_->window_list_cart.end()-1);
+		dc_->window_list_cart_f.erase(dc_->window_list_cart_f.end()-1);
+		dc_->stamp_list.erase(dc_->stamp_list.end()-1);
+		return false;
+	}
+
+	// Hard motion limit: reject physically implausible per-frame displacements
+	const double MAX_TRANS = 8.0;  // metres per frame
+	if (norm > MAX_TRANS) {
+		ROS_WARN("[PhaRaO] Implausible translation %.2f m — rejecting.", norm);
+		dc_->window_list.erase(dc_->window_list.end()-1);
+		dc_->window_list_cart.erase(dc_->window_list_cart.end()-1);
+		dc_->window_list_cart_f.erase(dc_->window_list_cart_f.end()-1);
+		dc_->stamp_list.erase(dc_->stamp_list.end()-1);
+		return false;
+	}
+
+	pose_count++;
+	pose_node_nums.push_back(pose_count);
+	if ((int)pose_values.size() == pose_count - 1) {
+		pose_values.push_back(current_pose);
+	}
+	cout << "pose num : " << pose_values.size() << endl;
+	base_pose = pose_values.at(pose_count - 1);
+
+	Eigen::Vector2d odom_tr(base_pose(0), base_pose(1));
+	Eigen::Rotation2D<double> odom_rot(base_pose(2));
+
+	Eigen::Vector2d tr_delta(x, y);
+	Eigen::Rotation2D<double> rot_delta(theta);
+
+	odom_rot = odom_rot * rot_delta;
+	odom_tr = odom_tr + odom_rot * tr_delta;
+
+	current_pose << odom_tr(0), odom_tr(1), odom_rot.angle();
+	Point2 prop_point = gtsam::Point2(current_pose(0), current_pose(1));
+	Rot2 orien = Rot2(current_pose(2));
+	Pose2 prop_pose = gtsam::Pose2(orien, prop_point);
+
+	// Always connect consecutive nodes: X(pose_count-1) → X(pose_count)
+	Pose2 odom_delta = gtsam::Pose2(x, y, theta_safe);
+
+	// Paper Eq. 9: Cf-weighted noise model.
+	// Cf scales the information (inverse covariance): high Cf → tight, low Cf → loose.
+	// Base sigma ~0.05m (coarse sub-pixel accuracy). Scale by 1/sqrt(Cf) so that
+	// low-confidence measurements get proportionally looser noise.
+	double cf_safe = std::max(cost, 0.01);  // avoid division by zero
+	double noise_scale = 1.0 / std::sqrt(cf_safe);  // Cf=1 → 1x, Cf=0.1 → 3.2x
+	auto adaptive_odom_noise = noiseModel::Diagonal::Sigmas(
+		(Vector(3) << odom_var_x_ * noise_scale,
+		              odom_var_y_ * noise_scale,
+		              odom_var_theta_ * noise_scale).finished());
+	poseGraph->add(BetweenFactor<Pose2>(X(pose_count-1), X(pose_count), odom_delta, adaptive_odom_noise));
+	initial_values.insert(X(pose_count), prop_pose);
+
+	Eigen::AngleAxisd rollAngle(0.0, Eigen::Vector3d::UnitX());
+	Eigen::AngleAxisd pitchAngle(0.0, Eigen::Vector3d::UnitY());
+	Eigen::AngleAxisd yawAngle(odom_rot.angle(), Eigen::Vector3d::UnitZ());
+	Eigen::Quaternion<double> gtsam_quat = yawAngle * pitchAngle * rollAngle;
+
+	publishOdom(*(dc_->stamp_list.end()-1), prop_pose, gtsam_quat);
+	if (save_flag_)
+		saveToFile(filename_odom_, *(dc_->stamp_list.end()-1), prop_pose, gtsam_quat);
+
+	cout << "Current pose number: " << pose_count << endl;
+	cout << "Best Matching pair: " << pose_count-1 << " & " << pose_count << endl;
+	cout << "x: " << odom_result[0] << ", y: " << odom_result[1]
+		<< ", theta: " << theta << endl;
+
+	return true;
 }
 
 void
@@ -220,6 +320,13 @@ GraphOptimizer::generateKeyfFactor()
 {
 	static int cnt = 0;
 	int num = dc_->window_list.size()-1;
+
+	// Safety: clamp index to prevent array overflow
+	if (num < 1) return;
+	if (num - 1 >= MAX_WINDOW) {
+		ROS_WARN("[PhaRaO] Keyframe window %d exceeds MAX_WINDOW=%d, forcing trim.", num, MAX_WINDOW);
+		num = MAX_WINDOW;
+	}
 
 	dc_->del_list[num-1] = factorGeneration(0,num);
 
@@ -313,7 +420,7 @@ GraphOptimizer::generateKeyfFactor()
 		// Constraints to decide keyframe
 		// Paper II.C.2)
 		bool constraint1 = (atv[num-1] < atv[num-2]) && (atv[num-1] < keyf_threshold_*atv[cost_idx[num-1]]);
-		bool constraint2 = (num > 3);
+		bool constraint2 = (num >= MAX_WINDOW - 2);  // force keyframe before overflow
 		bool constraint3 = (norm_v[0] > vel_threshold_);
 		bool constraint4 = (norm_w[0] > angvel_threshold_);
 
@@ -420,6 +527,22 @@ GraphOptimizer::generateKeyfFactor()
 				/////////////////////////////////////////////////////////
 				prev_pose = odom_result.at<Pose2>(X(new_key_node));
 
+				// Update current_pose to the GTSAM-optimized value at the latest
+				// node so that the next odom factor uses the corrected base pose,
+				// not the un-optimized dead-reckoning estimate.
+				{
+					Pose2 latest_opt = odom_result.at<Pose2>(X(pose_count));
+					current_pose << latest_opt.x(), latest_opt.y(), latest_opt.theta();
+					// Also update pose_values for the latest poses in the window
+					for (int ii = 0; ii < num; ii++) {
+						int idx = pose_count - num + 1 + ii;
+						if (idx >= 0 && idx < (int)pose_values.size()) {
+							Pose2 popt = odom_result.at<Pose2>(X(idx));
+							pose_values[idx] << popt.x(), popt.y(), popt.theta();
+						}
+					}
+				}
+
 				cout << "Last Pose value:\n     x:" << prev_pose.translation().x() 
 					<< "     y:"<< prev_pose.translation().y() 
 					<< "     theta:"<< prev_pose.rotation().theta()<<endl;
@@ -476,7 +599,7 @@ GraphOptimizer::generateKeyfFactor()
 				dc_->keyf_list_cart_f.push_back(last_cf);
 				dc_->keyf_stamp_list.push_back(last_time);
 
-				std::array<std::array<double, 3>, NUM> temp_odom_list;
+				std::array<std::array<double, 3>, MAX_WINDOW> temp_odom_list;
 				copy(dc_->odom_list.begin(), dc_->odom_list.end(), temp_odom_list.begin());
 				dc_->odom_list.fill({});
 

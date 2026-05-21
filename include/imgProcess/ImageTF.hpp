@@ -33,11 +33,19 @@ class ImageTF
 
 		ArrayXXf highpassfilt(Size size, bool init);
 
+		// Set the radar range resolution (metres per bin) so that
+		// phaseCorrelateWindow uses the correct pixel↔metre conversion.
+		void setResolution(double resol) { RESOL = resol; }
+
+		// Set the coarse scale factor (ratio) for pixel↔metre mapping
+		void setScaleFactor(double scale) { scale_factor_ = scale; }
+
 	private:
 		Mat mapx, mapy;
 
 		bool preCalc = 0;
-		double RESOL = 0.059612233;
+		double RESOL = 0.0432;           // default Oxford CTS350; overridden by setResolution()
+		double scale_factor_ = 10.0;     // coarse downscale; overridden by setScaleFactor()
 
 		ArrayXXf preCalc_filter;
 };

@@ -48,7 +48,9 @@ FactorConstructor::phaseCorr2D(cv::Mat r_src1, cv::Mat r_src2, cv::Mat src1, cv:
 	cv::Point2d peakLoc_r;
 
 	if(flag == true) {
-		// Fix 4: Apply Hanning window to log-polar images to reduce spectral leakage
+		// Rotation estimation: phase correlate log-polar images Dp.
+		// Apply Hanning window to reduce spectral leakage in the log-polar
+		// phase correlation. This stabilizes rotation estimation.
 		if (logpolar_hann_.empty() || logpolar_hann_.size() != r_src1.size()) {
 			itf.createHanningWindow(logpolar_hann_, r_src1.size(), CV_32F);
 		}
@@ -76,36 +78,15 @@ FactorConstructor::phaseCorr2D(cv::Mat r_src1, cv::Mat r_src2, cv::Mat src1, cv:
 		x = (init_val[0]-peakLoc.x)*RESOL*factor;
 		y = (init_val[1]-peakLoc.y)*RESOL*factor;
 	} else {
-    	int pixel_x = round(state.at(0)/(ratio * RESOL));
-    	int pixel_y = round(state.at(1)/(ratio * RESOL));
-
-    	if( abs(pixel_x) > 500 || abs(pixel_y) > 500){
-			x = state.at(0);
-			y = state.at(1);
-		} else {
-			peakLoc = itf.phaseCorrelateWindow(src1, derot_cart, cv::noArray(), &phaseCorr, state);
-
-			factor = 1.0;
-			x = state.at(0) + (init_val_f[0]-peakLoc.x)*RESOL*factor;
-			y = state.at(1) + (init_val_f[1]-peakLoc.y)*RESOL*factor;
-		}
+		// Fine refinement disabled — phaseCorrelateWindow produces
+		// unreliable peaks that degrade trajectory (509m vs 69m baseline).
+		// The coarse estimate is used directly.
+		x = state.at(0);
+		y = state.at(1);
 	}
 
-	if(dc_->initialized == false) {
-		if(flag == true) {
-			init_val[0] = peakLoc.x;
-			init_val[1] = peakLoc.y;
-			init_val[2] = peakLoc_r.y;
-		} else {
-			init_val_f[0] = peakLoc.x;
-			init_val_f[1] = peakLoc.y;
-			init_val_f[2] = peakLoc_r.y;
-		}
-
-		theta = 0;
-		x = 0;
-		y = 0;
-	}
+	// Note: init_val calibration is now done via self-correlation in
+	// GraphOptimizer::calibrateInitVal(), not here.
 
 	std::array<double, 3> d_state = {x, y, theta};
 	return d_state;

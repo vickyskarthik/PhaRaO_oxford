@@ -683,11 +683,11 @@ Point2d ImageTF::phaseCorrelateWindow(InputArray _src1, InputArray _src2, InputA
     // locate the highest peak
     int win_range = 10;
     int mid = src1.rows/2;
-    // Note: 10.0 here is the coarse_scale_factor (ratio). state[] is in metres,
-    // and we need to convert back to coarse pixels to find the search centre.
-    // coarse pixel = metres / (ratio * RESOL). ratio=10.0 for all current configs.
-    double pixel_x = round(state.at(0)/(10.0 * RESOL));
-    double pixel_y = round(state.at(1)/(10.0 * RESOL));
+    // Convert coarse estimate (metres) to fine-image pixels for the search
+    // ROI centre.  The fine correlation surface has 1:1 pixel-to-bin mapping
+    // (1 pixel = RESOL metres), so we convert: pixels = metres / RESOL.
+    double pixel_x = round(state.at(0) / RESOL);
+    double pixel_y = round(state.at(1) / RESOL);
 
     // Clamp ROI to stay within C bounds
     int rx = static_cast<int>(pixel_x) + (mid - win_range);
@@ -769,17 +769,18 @@ ArrayXXf
 ImageTF::highpassfilt(Size size, bool init)
 {
     if(init == false) {
-    	double res_ht = 1.0 / (size.height-1.0);
-    	double res_wd = 1.0 / (size.width-1.0);
-
+    	// High-pass emphasis filter (raised cosine):
+    	//   H(u,v) = (1 - cos(π u/N)) * (1 - cos(π v/M))
+    	// Suppresses DC and low-frequency content, preserving the
+    	// high-frequency edge structure for FMT rotation estimation.
     	VectorXf eta(size.height);
     	VectorXf neta(size.width);
 
     	for(int i = 0; i < size.height; i++){
-    		eta(i) = cos(M_PI*(res_ht*i - 0.5));
+    		eta(i) = 1.0f - cos(M_PI * (float)i / (float)(size.height - 1));
     	}
     	for(int i = 0; i < size.width; i++){
-    		neta(i) = cos(M_PI*(res_wd*i - 0.5));
+    		neta(i) = 1.0f - cos(M_PI * (float)i / (float)(size.width - 1));
     	}
 
     	ArrayXXf X = eta*neta.transpose();

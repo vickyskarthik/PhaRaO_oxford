@@ -17,6 +17,7 @@ class GraphOptimizer : public FactorConstructor
 		bool generateOdomFactor();
 		void generateKeyfFactor();
 		void optimize();
+		void calibrateInitVal();  // self-correlation baseline calibration
 
 		// Expose latest (x, y, theta) for per-frame error reporting in main.cpp
 		Eigen::Vector3d getLatestPose() const { return current_pose.cast<double>(); }
@@ -48,11 +49,11 @@ class GraphOptimizer : public FactorConstructor
 		string filename_odom_ = "./odom.txt";
 		string filename_optodom_ = "./optodom.txt";
 
-		std::array<int, NUM> cost_idx;
-		std::array<int, NUM> cost_iter;
-		std::array<double, NUM> atv;
-		double norm_v[NUM];
-		double norm_w[NUM];
+		std::array<int, MAX_WINDOW> cost_idx;
+		std::array<int, MAX_WINDOW> cost_iter;
+		std::array<double, MAX_WINDOW> atv;
+		double norm_v[MAX_WINDOW];
+		double norm_w[MAX_WINDOW];
 
 		// GTSAM
 		ISAM2 *isam2;

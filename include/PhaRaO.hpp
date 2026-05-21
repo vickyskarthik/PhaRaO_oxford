@@ -60,6 +60,8 @@ class PhaRaO
 		double param_resol_ = 0.059612233;  // radar range resolution
 		bool param_display_ = false;        // enable imshow display
 		bool param_use_log_mag_ = true;     // use log(magnitude) in FMT (original code)
+		bool param_spectral_whitening_ = false; // local spectral whitening to remove FMT bias
+		double param_whitening_sigma_ = 15.0;   // Gaussian sigma for local avg (pixels in DFT domain)
 
 		int width_, height_;
 		int p_width_, p_height_;
@@ -78,4 +80,8 @@ class PhaRaO
 		double prev_w = 0.0;
 		bool exec = false;
 
+		// Debug: save intermediate images for specific frames
+		int frame_counter_ = 0;
+		std::string debug_dir_ = "/home/mcw/Desktop/MAY16PhD/results/cpp_debug/";
+		void saveDebugImg(const cv::Mat& img, const std::string& name);
 };

@@ -3,7 +3,9 @@
 #include <vector>
 #include <array>
 
-#define NUM 4
+// Maximum sliding window size.  The keyframe factor logic triggers
+// when window_list grows beyond this, so the arrays never overflow.
+#define MAX_WINDOW 8
 
 struct DataContainer
 {
@@ -20,6 +22,6 @@ struct DataContainer
     std::vector<ros::Time> stamp_list;
     std::vector<ros::Time> keyf_stamp_list;
 
-    std::array<std::array<double, 3>, NUM> del_list;
-    std::array<std::array<double, 3>, NUM> odom_list;
+    std::array<std::array<double, 3>, MAX_WINDOW> del_list;
+    std::array<std::array<double, 3>, MAX_WINDOW> odom_list;
 };
